@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RECOMID</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <header class="top-bar">
+        <div class="brand">
+            <div class="brand-mark" aria-hidden="true">R</div>
+            <div class="brand-text">
+                <h1>RECOMID</h1>
+                <p class="tagline">Music Recommender — Personalized suggestions powered by Spotify.</p>
+            </div>
+        </div>
+        <div class="profile" id="profile">
+            <button id="login-btn" class="primary">Login with Spotify</button>
+            <button id="logout-btn" class="secondary" hidden>Logout</button>
+            <div class="profile-info" hidden id="profile-info">
+                <img id="profile-img" alt="Profile" />
+                <div>
+                    <div id="profile-name"></div>
+                    <div class="small">Logged in via Spotify</div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="controls">
+            <div class="row">
+                <button id="top-tracks-btn" class="primary" disabled>Get My Top Tracks</button>
+                <button id="recommendations-btn" class="primary" disabled>Get Recommendations</button>
+                <button id="create-playlist-btn" class="primary" disabled>Add to Playlist</button>
+            </div>
+        </section>
+
+        <section class="results">
+            <div class="column">
+                <h2>Top Tracks (Based on Recently Played)</h2>
+                <div id="top-tracks" class="cards"></div>
+            </div>
+
+            <div class="column">
+                <h2>Recommended Songs</h2>
+                <div id="recommended-tracks" class="cards"></div>
+            </div>
+        </section>
+
+        <section class="message" id="message" hidden></section>
+    </main>
+
+    <!-- Playlist Creation Modal - Hidden by default -->
+    <div id="playlist-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h2>Create Playlist</h2>
+            <p>Enter a name for your new playlist:</p>
+            <input type="text" id="playlist-name-input" placeholder="My Recommendations" />
+            <div class="modal-buttons">
+                <button id="modal-cancel-btn" class="secondary">Cancel</button>
+                <button id="modal-done-btn" class="primary">Add to Playlist</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="error-popup" class="modal-overlay" style="display: none;">
+        <div class="modal-content popup-content">
+            <h2 id="error-popup-title">Error</h2>
+            <p id="error-popup-message"></p>
+            <div class="modal-buttons">
+                <button id="error-popup-close" class="primary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="blocked-popup" class="modal-overlay" style="display: none;">
+        <div class="modal-content popup-content blocked-popup-content">
+            <h2>Some Songs Were Blocked</h2>
+            <p>Sorry, Spotify blocked some of the songs you tried to add. You can try adding them yourself in the Spotify app.</p>
+            <div id="blocked-popup-summary" class="blocked-summary"></div>
+            <div id="blocked-popup-list" class="blocked-list"></div>
+            <div class="modal-buttons">
+                <button id="blocked-popup-close" class="primary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=18"></script>
+</body>
+</html>
