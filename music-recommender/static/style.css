@@ -139,12 +139,19 @@ button {
 
 button.primary {
   background: linear-gradient(135deg, #1db954, #50c878);
-  color: #0b1510;
+  color:white;
+  font-weight: bold;
+}
+#profile-name{
+  color: white;
+  font-weight: bold;
 }
 
 button.secondary {
   background: rgba(255, 255, 255, 0.1);
   color: #f0f4f8;
+    font-weight: bold;
+
 }
 
 button:hover:not(:disabled) {

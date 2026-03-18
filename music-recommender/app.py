@@ -28,7 +28,11 @@ DB_PATH = os.path.join(BASE_DIR, 'database', 'recommend.db')
 SCHEMA_PATH = os.path.join(BASE_DIR, 'database', 'schema.sql')
 
 # Spotify scopes for OAuth
-SPOTIFY_SCOPES = 'user-top-read user-read-recently-played playlist-modify-public playlist-modify-private'
+SPOTIFY_SCOPES = (
+    'user-read-private user-read-email '
+    'user-top-read user-read-recently-played '
+    'playlist-modify-public playlist-modify-private'
+)
 
 
 def get_db():
@@ -584,6 +588,41 @@ def refresh_access_token(refresh_token: str) -> Tuple[Optional[str], Optional[in
     return access_token, expires_at
 
 
+def spotify_post_with_retry(
+    url: str,
+    headers: dict,
+    json_payload: dict,
+    max_retries: int = 2,
+) -> Optional[requests.Response]:
+    """POST to Spotify and retry on 429 using Retry-After."""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, json=json_payload, headers=headers, timeout=12)
+        except requests.exceptions.RequestException as e:
+            app.logger.warning('Spotify POST network error (%s): %s', url, str(e))
+            if attempt == max_retries:
+                return None
+            time.sleep(0.5)
+            continue
+
+        if resp.status_code != 429:
+            return resp
+
+        retry_after_raw = resp.headers.get('Retry-After', '1')
+        try:
+            retry_after = max(1, min(int(float(retry_after_raw)), 30))
+        except (TypeError, ValueError):
+            retry_after = 1
+
+        app.logger.warning('Spotify rate limited POST (%s). Retry after %ss', url, retry_after)
+        if attempt == max_retries:
+            return resp
+
+        time.sleep(retry_after)
+
+    return None
+
+
 def get_access_token() -> Optional[str]:
     """Return a valid access token for the current session's Spotify user."""
     spotify_id = session.get('spotify_id')
@@ -641,6 +680,14 @@ def logout():
 @app.route('/callback')
 def callback():
     """Handle Spotify OAuth callback and store tokens."""
+    auth_error = request.args.get('error')
+    if auth_error:
+        return (
+            'Spotify login failed. If your app is in Development mode, add this Spotify account '
+            'as a tester in the Spotify Developer Dashboard, then try again.',
+            400,
+        )
+
     code = request.args.get('code')
     if not code:
         return 'Missing authorization code', 400
@@ -648,8 +695,23 @@ def callback():
     data = {'grant_type': 'authorization_code', 'code': code, 'redirect_uri': REDIRECT_URI}
     auth_header = (SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
 
-    token_response = requests.post('https://accounts.spotify.com/api/token', data=data, auth=auth_header)
+    try:
+        token_response = requests.post(
+            'https://accounts.spotify.com/api/token',
+            data=data,
+            auth=auth_header,
+            timeout=12,
+        )
+    except requests.exceptions.RequestException as e:
+        app.logger.error('Token exchange request failed: %s', str(e))
+        return 'Spotify token exchange failed. Please try again.', 502
+
     if token_response.status_code != 200:
+        app.logger.error(
+            'Failed to get access token from Spotify: %s %s',
+            token_response.status_code,
+            token_response.text[:300],
+        )
         return 'Failed to get access token from Spotify', 500
 
     tokens = token_response.json()
@@ -659,11 +721,37 @@ def callback():
     if not access_token or not refresh_token:
         return 'Invalid token response from Spotify', 500
 
-    profile_resp = requests.get(
-        'https://api.spotify.com/v1/me',
-        headers={'Authorization': f'Bearer {access_token}'},
-    )
+    profile_resp = None
+    for _ in range(3):
+        try:
+            profile_resp = requests.get(
+                'https://api.spotify.com/v1/me',
+                headers={'Authorization': f'Bearer {access_token}'},
+                timeout=12,
+            )
+        except requests.exceptions.RequestException as e:
+            app.logger.warning('Failed to fetch Spotify profile (network): %s', str(e))
+            continue
+
+        # Retry only temporary upstream conditions.
+        if profile_resp.status_code in (429, 500, 502, 503, 504):
+            app.logger.warning('Transient profile fetch status %s, retrying', profile_resp.status_code)
+            time.sleep(0.6)
+            continue
+        break
+
     if profile_resp.status_code != 200:
+        app.logger.error(
+            'Failed to fetch Spotify profile: %s %s',
+            profile_resp.status_code,
+            profile_resp.text[:300],
+        )
+        if profile_resp.status_code in (401, 403):
+            return (
+                'Failed to fetch Spotify profile. Ensure this account is allowed for your app '
+                '(if app is in Development mode) and try logging in again.',
+                500,
+            )
         return 'Failed to fetch Spotify profile', 500
 
     profile = profile_resp.json()
@@ -967,18 +1055,25 @@ def create_playlist():
     user_country = get_user_country(sp)
 
     # Create the playlist
-    create_resp = requests.post(
-        'https://api.spotify.com/v1/me/playlists',
-        json={'name': playlist_name, 'public': False},
+    create_resp = spotify_post_with_retry(
+        url='https://api.spotify.com/v1/me/playlists',
         headers=headers,
+        json_payload={'name': playlist_name, 'public': False},
+        max_retries=2,
     )
+    if create_resp is None:
+        return jsonify({'error': 'playlist_creation_failed', 'message': 'Spotify request failed due to network issues.'}), 502
+
     if create_resp.status_code not in (200, 201):
         app.logger.error('Playlist creation failed: %s %s', create_resp.status_code, create_resp.text[:300])
-        status = 403 if create_resp.status_code == 403 else 500
+        status = 403 if create_resp.status_code == 403 else (429 if create_resp.status_code == 429 else 500)
         detail = create_resp.text[:300]
         message = 'Failed to create playlist in Spotify.'
         if create_resp.status_code == 403:
             message = 'Spotify denied playlist creation. Please log out and log in again to refresh permissions.'
+        elif create_resp.status_code == 429:
+            retry_after = create_resp.headers.get('Retry-After', 'a few')
+            message = f'Spotify is rate-limiting requests. Please wait {retry_after} seconds and try again.'
         return jsonify({'error': 'playlist_creation_failed', 'message': message, 'detail': detail}), status
 
     playlist = create_resp.json()
@@ -997,14 +1092,26 @@ def create_playlist():
     skipped_uris = []
     blocked_tracks = []
     added_uris = set()
+    rate_limited = False
+    rate_limited_retry_after = None
 
     for i in range(0, len(normalized_uris), 100):
         chunk = normalized_uris[i:i + 100]
-        add_resp = requests.post(
-            f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
-            json={'uris': chunk},
+        add_resp = spotify_post_with_retry(
+            url=f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
             headers=headers,
+            json_payload={'uris': chunk},
+            max_retries=2,
         )
+        if add_resp is None:
+            rate_limited = True
+            break
+
+        if add_resp.status_code == 429:
+            rate_limited = True
+            rate_limited_retry_after = add_resp.headers.get('Retry-After')
+            break
+
         if add_resp.status_code in (200, 201):
             added_count += len(chunk)
             for uri in chunk:
@@ -1015,11 +1122,21 @@ def create_playlist():
 
         # Retry each track so we can skip only blocked items.
         for uri in chunk:
-            single_resp = requests.post(
-                f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
-                json={'uris': [uri]},
+            single_resp = spotify_post_with_retry(
+                url=f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
                 headers=headers,
+                json_payload={'uris': [uri]},
+                max_retries=1,
             )
+            if single_resp is None:
+                rate_limited = True
+                break
+
+            if single_resp.status_code == 429:
+                rate_limited = True
+                rate_limited_retry_after = single_resp.headers.get('Retry-After')
+                break
+
             if single_resp.status_code in (200, 201):
                 added_count += 1
                 added_uris.add(uri)
@@ -1032,11 +1149,19 @@ def create_playlist():
                 )
 
                 if alternative_uri:
-                    alt_resp = requests.post(
-                        f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
-                        json={'uris': [alternative_uri]},
+                    alt_resp = spotify_post_with_retry(
+                        url=f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
                         headers=headers,
+                        json_payload={'uris': [alternative_uri]},
+                        max_retries=1,
                     )
+                    if alt_resp is None:
+                        rate_limited = True
+                        break
+                    if alt_resp.status_code == 429:
+                        rate_limited = True
+                        rate_limited_retry_after = alt_resp.headers.get('Retry-After')
+                        break
                     if alt_resp.status_code in (200, 201):
                         added_count += 1
                         substituted_count += 1
@@ -1053,6 +1178,25 @@ def create_playlist():
                     single_resp.status_code,
                     single_resp.text[:180],
                 )
+
+        if rate_limited:
+            break
+
+    if rate_limited and added_count > 0:
+        retry_text = f' Retry after ~{rate_limited_retry_after}s.' if rate_limited_retry_after else ''
+        return jsonify({
+            'status': 'ok',
+            'playlist_id': playlist_id,
+            'playlist_url': playlist_url,
+            'name': playlist_name,
+            'added_count': added_count,
+            'skipped_count': skipped_count,
+            'substituted_count': substituted_count,
+            'skipped_uris': skipped_uris[:10],
+            'blocked_tracks': blocked_tracks,
+            'message': f'Spotify rate-limited track additions. Added available songs so far.{retry_text}',
+            'rate_limited': True,
+        })
 
     if added_count == 0:
         # Last fallback: seed the playlist with user's top tracks so it isn't empty.

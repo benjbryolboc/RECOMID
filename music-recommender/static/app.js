@@ -595,6 +595,14 @@ async function createPlaylist(payloadOverride = null) {
     return;
   }
 
+  if (data.rate_limited) {
+    showMessage(
+      `${data.message} <a href="${url}" target="_blank">Open in Spotify</a>`,
+      'warning',
+    );
+    return;
+  }
+
   if (skippedCount > 0) {
     const skippedIds = extractTrackIdsFromUris(data.skipped_uris || []);
     if (skippedIds.length > 0) {
